@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# --- Stage 1: Build Radarr from source ---
-FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS builder
+# --- Stage 1: Build frontend ---
+FROM node:20-alpine AS frontend
 
 ARG RADARR_REPO="https://github.com/AlexMasson/Radarr.git"
 ARG RADARR_BRANCH="feature/llm-prioritization"
@@ -11,17 +11,27 @@ RUN apk add --no-cache git && \
 
 WORKDIR /src
 
-RUN dotnet publish src/NzbDrone.Console/Radarr.Console.csproj \
-      -f net8.0 \
-      -c Release \
-      -o /build \
-      -r linux-musl-x64 \
-      --self-contained=false \
-      /p:PublishSingleFile=false \
-      /p:TreatWarningsAsErrors=false && \
-    rm -rf /build/Radarr.Update
+RUN yarn install --frozen-lockfile && \
+    yarn build --env production
 
-# --- Stage 2: Runtime image (same as upstream linuxserver) ---
+# --- Stage 2: Build backend ---
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS builder
+
+COPY --from=frontend /src /src
+
+WORKDIR /src/src
+
+RUN dotnet msbuild -restore Radarr.sln \
+      -p:SelfContained=True \
+      -p:Configuration=Release \
+      -p:RuntimeIdentifiers=linux-musl-x64 \
+      -t:PublishAllRids \
+      /p:TreatWarningsAsErrors=false && \
+    mkdir /build && \
+    cp -r /src/_output/net8.0/linux-musl-x64/publish/* /build/ && \
+    cp -r /src/_output/UI /build/UI
+
+# --- Stage 3: Runtime image (same as upstream linuxserver) ---
 FROM ghcr.io/linuxserver/baseimage-alpine:3.23
 
 # set version label
@@ -43,7 +53,7 @@ RUN \
     xmlstarlet && \
   mkdir -p /app/radarr/bin
 
-# copy built binaries from builder stage
+# copy built binaries and UI from builder stage (UI goes inside bin/)
 COPY --from=builder /build/ /app/radarr/bin/
 
 RUN \
